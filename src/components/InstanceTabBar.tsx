@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import {
@@ -62,9 +62,27 @@ export function InstanceTabBar({
   const [editingHost, setEditingHost] = useState<SshHost | null>(null);
   const [form, setForm] = useState<Omit<SshHost, "id">>(emptyHost);
   const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string>("");
   const [keyGuideOpen, setKeyGuideOpen] = useState(false);
   const [sshConfigHosts, setSshConfigHosts] = useState<SshConfigHostSuggestion[]>([]);
   const [selectedConfigAlias, setSelectedConfigAlias] = useState<string | undefined>(undefined);
+  const duplicateDisplayNames = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const host of hosts) {
+      const key = (host.label || host.host).trim().toLowerCase();
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return counts;
+  }, [hosts]);
+  const hasDuplicateInputName = useMemo(() => {
+    const pending = (form.label.trim() || form.host.trim()).toLowerCase();
+    if (!pending) return false;
+    return hosts.some(
+      (h) =>
+        h.id !== editingHost?.id &&
+        ((h.label || h.host).trim().toLowerCase() === pending),
+    );
+  }, [editingHost?.id, form.host, form.label, hosts]);
 
   useEffect(() => {
     api
@@ -76,6 +94,7 @@ export function InstanceTabBar({
   const openAddDialog = () => {
     setEditingHost(null);
     setForm({ ...emptyHost });
+    setFormError("");
     setSelectedConfigAlias(undefined);
     setDialogOpen(true);
   };
@@ -91,6 +110,7 @@ export function InstanceTabBar({
       keyPath: host.keyPath,
       password: host.password,
     });
+    setFormError("");
     setSelectedConfigAlias(undefined);
     setDialogOpen(true);
   };
@@ -109,10 +129,15 @@ export function InstanceTabBar({
   };
 
   const handleSave = () => {
+    if (hasDuplicateInputName) {
+      setFormError(t('instance.duplicateLabelError'));
+      return;
+    }
     const host: SshHost = {
       id: editingHost?.id ?? crypto.randomUUID(),
       ...form,
     };
+    setFormError("");
     setSaving(true);
     api
       .upsertSshHost(host)
@@ -142,6 +167,14 @@ export function InstanceTabBar({
           ? "bg-red-400"
           : "bg-muted-foreground/40";
     return <span className={cn("inline-block w-2 h-2 rounded-full shrink-0 transition-colors duration-300", color)} />;
+  };
+
+  const hostDisplayName = (host: SshHost) => {
+    const base = (host.label || host.host).trim();
+    const duplicate = (duplicateDisplayNames.get(base.toLowerCase()) || 0) > 1;
+    if (!duplicate) return base;
+    const userPrefix = host.username ? `${host.username}@` : "";
+    return `${base} (${userPrefix}${host.host}:${host.port})`;
   };
 
   return (
@@ -181,7 +214,7 @@ export function InstanceTabBar({
               }}
             >
               {statusDot(connectionStatus[host.id])}
-              {host.label || host.host}
+              {hostDisplayName(host)}
             </button>
             <AlertDialog>
               <AlertDialogTrigger asChild>
@@ -198,7 +231,7 @@ export function InstanceTabBar({
                 <AlertDialogHeader>
                   <AlertDialogTitle>{t('instance.deleteTitle')}</AlertDialogTitle>
                   <AlertDialogDescription>
-                    {t('instance.deleteDescription', { label: host.label || host.host })}
+                    {t('instance.deleteDescription', { label: hostDisplayName(host) })}
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -240,9 +273,17 @@ export function InstanceTabBar({
               <Input
                 id="ssh-label"
                 value={form.label}
-                onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
+                onChange={(e) => {
+                  setForm((f) => ({ ...f, label: e.target.value }));
+                  if (formError) setFormError("");
+                }}
                 placeholder={t('instance.labelPlaceholder')}
               />
+              {hasDuplicateInputName && (
+                <p className="text-xs text-destructive">
+                  {t('instance.duplicateLabelError')}
+                </p>
+              )}
             </div>
             {sshConfigHosts.length > 0 && (
               <div className="space-y-1.5">
@@ -276,7 +317,10 @@ export function InstanceTabBar({
               <Input
                 id="ssh-host"
                 value={form.host}
-                onChange={(e) => setForm((f) => ({ ...f, host: e.target.value }))}
+                onChange={(e) => {
+                  setForm((f) => ({ ...f, host: e.target.value }));
+                  if (formError) setFormError("");
+                }}
                 placeholder="192.168.1.100"
                 autoCapitalize="off"
                 autoCorrect="off"
@@ -349,6 +393,11 @@ export function InstanceTabBar({
             )}
           </div>
           <DialogFooter>
+            {formError && (
+              <p className="text-xs text-destructive mr-auto">
+                {formError}
+              </p>
+            )}
             <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={saving}>
               {t('instance.cancel')}
             </Button>

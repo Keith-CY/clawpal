@@ -34,6 +34,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { Toaster } from "sonner";
 import type { DiscordGuildChannel, SshHost } from "./lib/types";
 
 const PING_URL = "https://api.clawpal.zhixian.io/ping";
@@ -577,6 +578,7 @@ export function App() {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    <Toaster position="top-right" richColors />
     </>
   );
 }
