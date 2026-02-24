@@ -3029,6 +3029,9 @@ fn run_provider_probe(
         .starts_with(&provider_prefix)
     {
         model_trimmed = model_trimmed[provider_prefix.len()..].to_string();
+        if model_trimmed.trim().is_empty() {
+            return Err("model is empty after provider prefix normalization".into());
+        }
     }
     if api_key.trim().is_empty() {
         return Err("API key is not configured for this profile".into());
@@ -3115,8 +3118,21 @@ pub async fn test_model_profile(profile_id: String) -> Result<bool, String> {
         return Err("No API key resolved for this profile".into());
     }
 
+    let resolved_base_url = profile
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            fs::read_to_string(&paths.config_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .and_then(|cfg| resolve_model_provider_base_url(&cfg, &profile.provider))
+        });
+
     tauri::async_runtime::spawn_blocking(move || {
-        run_provider_probe(profile.provider, profile.model, profile.base_url, api_key)
+        run_provider_probe(profile.provider, profile.model, resolved_base_url, api_key)
     })
     .await
     .map_err(|e| format!("Task join failed: {e}"))??;
@@ -5993,14 +6009,18 @@ pub async fn remote_resolve_api_keys(
     pool: State<'_, SshConnectionPool>,
     host_id: String,
 ) -> Result<Vec<ResolvedApiKey>, String> {
-    let content = pool.sftp_read(&host_id, "~/.clawpal/model-profiles.json").await
-        .unwrap_or_else(|_| r#"{"profiles":[]}"#.to_string());
+    let content = match pool.sftp_read(&host_id, "~/.clawpal/model-profiles.json").await {
+        Ok(content) => content,
+        Err(e) if is_remote_missing_path_error(&e) => r#"{"profiles":[]}"#.to_string(),
+        Err(e) => return Err(format!("Failed to read remote model profiles: {e}")),
+    };
     #[derive(serde::Deserialize)]
     struct Storage {
         #[serde(default)]
         profiles: Vec<ModelProfile>,
     }
-    let storage: Storage = serde_json::from_str(&content).unwrap_or(Storage { profiles: Vec::new() });
+    let storage: Storage = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse remote model profiles: {e}"))?;
     let mut out = Vec::new();
     for profile in &storage.profiles {
         let masked = if let Some(ref key) = profile.api_key {
@@ -6026,38 +6046,134 @@ pub async fn remote_resolve_api_keys(
     Ok(out)
 }
 
-async fn resolve_remote_profile_api_key(
+fn is_remote_missing_path_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("no such file")
+        || lower.contains("no such file or directory")
+        || lower.contains("not found")
+        || lower.contains("cannot open")
+}
+
+async fn read_remote_env_var(
     pool: &SshConnectionPool,
     host_id: &str,
-    profile: &ModelProfile,
-) -> String {
-    if let Some(key) = &profile.api_key {
-        let trimmed_key = key.trim();
-        if !trimmed_key.is_empty() {
-            return trimmed_key.to_string();
-        }
+    name: &str,
+) -> Result<Option<String>, String> {
+    let cmd = format!("printenv {name}");
+    let out = pool
+        .exec_login(host_id, &cmd)
+        .await
+        .map_err(|e| format!("Failed to read remote env var {name}: {e}"))?;
+
+    if out.exit_code != 0 {
+        return Ok(None);
     }
 
-    let auth_ref = profile.auth_ref.trim();
-    if auth_ref.is_empty() {
-        return String::new();
+    let value = out.stdout.trim();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value.to_string()))
     }
+}
 
-    // Remote fallback: treat auth_ref as env var name when safe.
-    if auth_ref
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        let cmd = format!("printenv {auth_ref}");
-        if let Ok(out) = pool.exec_login(host_id, &cmd).await {
-            let key = out.stdout.trim().to_string();
-            if !key.is_empty() {
-                return key;
+async fn resolve_remote_key_from_agent_auth_profiles(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    auth_ref: &str,
+) -> Result<Option<String>, String> {
+    let entries = pool
+        .sftp_list(host_id, "~/.openclaw/agents")
+        .await
+        .map_err(|e| format!("Failed to list remote agents directory: {e}"))?;
+
+    for agent in entries.into_iter().filter(|entry| entry.is_dir) {
+        let auth_file = format!("~/.openclaw/agents/{}/agent/auth-profiles.json", agent.name);
+        let text = match pool.sftp_read(host_id, &auth_file).await {
+            Ok(text) => text,
+            Err(e) if is_remote_missing_path_error(&e) => continue,
+            Err(e) => return Err(format!("Failed to read remote auth profiles at {auth_file}: {e}")),
+        };
+        let data: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("Failed to parse remote auth profiles at {auth_file}: {e}"))?;
+        if let Some(profiles) = data.get("profiles").and_then(Value::as_object) {
+            if let Some(auth_entry) = profiles.get(auth_ref) {
+                if let Some(key) = extract_token_from_auth_entry(auth_entry) {
+                    return Ok(Some(key));
+                }
             }
         }
     }
 
-    String::new()
+    Ok(None)
+}
+
+async fn resolve_remote_profile_base_url(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    profile: &ModelProfile,
+) -> Result<Option<String>, String> {
+    if let Some(base) = profile
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return Ok(Some(base.to_string()));
+    }
+
+    let raw = match pool.sftp_read(host_id, "~/.openclaw/openclaw.json").await {
+        Ok(raw) => raw,
+        Err(e) if is_remote_missing_path_error(&e) => return Ok(None),
+        Err(e) => return Err(format!("Failed to read remote config for base URL resolution: {e}")),
+    };
+    let cfg: Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("Failed to parse remote config for base URL resolution: {e}"))?;
+    Ok(resolve_model_provider_base_url(&cfg, &profile.provider))
+}
+
+async fn resolve_remote_profile_api_key(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    profile: &ModelProfile,
+) -> Result<String, String> {
+    if let Some(key) = &profile.api_key {
+        let trimmed_key = key.trim();
+        if !trimmed_key.is_empty() {
+            return Ok(trimmed_key.to_string());
+        }
+    }
+
+    let auth_ref = profile.auth_ref.trim();
+    if !auth_ref.is_empty() {
+        // Try auth_ref as remote env var name directly (e.g. OPENAI_API_KEY)
+        if auth_ref
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            if let Some(key) = read_remote_env_var(pool, host_id, auth_ref).await? {
+                return Ok(key);
+            }
+        }
+
+        // Try auth_ref from remote agent auth-profiles.json
+        if let Some(key) = resolve_remote_key_from_agent_auth_profiles(pool, host_id, auth_ref).await? {
+            return Ok(key);
+        }
+    }
+
+    // Try provider-based env conventions as fallback
+    let provider = profile.provider.trim().to_uppercase().replace('-', "_");
+    if !provider.is_empty() {
+        for suffix in ["_API_KEY", "_KEY", "_TOKEN"] {
+            let env_name = format!("{provider}{suffix}");
+            if let Some(key) = read_remote_env_var(pool, host_id, &env_name).await? {
+                return Ok(key);
+            }
+        }
+    }
+
+    Ok(String::new())
 }
 
 #[tauri::command]
@@ -6066,10 +6182,14 @@ pub async fn remote_test_model_profile(
     host_id: String,
     profile_id: String,
 ) -> Result<bool, String> {
-    let content = pool
+    let content = match pool
         .sftp_read(&host_id, "~/.clawpal/model-profiles.json")
         .await
-        .unwrap_or_else(|_| r#"{"profiles":[]}"#.to_string());
+    {
+        Ok(content) => content,
+        Err(e) if is_remote_missing_path_error(&e) => r#"{"profiles":[]}"#.to_string(),
+        Err(e) => return Err(format!("Failed to read remote model profiles: {e}")),
+    };
     #[derive(serde::Deserialize)]
     struct Storage {
         #[serde(default)]
@@ -6087,16 +6207,17 @@ pub async fn remote_test_model_profile(
         return Err("Profile is disabled".into());
     }
 
-    let api_key = resolve_remote_profile_api_key(&pool, &host_id, &profile).await;
+    let api_key = resolve_remote_profile_api_key(&pool, &host_id, &profile).await?;
     if api_key.trim().is_empty() {
         return Err(
-            "No API key resolved for this remote profile. Set apiKey directly or export auth_ref on remote shell."
-                .into(),
+            "No API key resolved for this remote profile. Set apiKey directly, configure auth_ref in remote auth-profiles.json, or export auth_ref on remote shell.".into(),
         );
     }
 
+    let resolved_base_url = resolve_remote_profile_base_url(&pool, &host_id, &profile).await?;
+
     tauri::async_runtime::spawn_blocking(move || {
-        run_provider_probe(profile.provider, profile.model, profile.base_url, api_key)
+        run_provider_probe(profile.provider, profile.model, resolved_base_url, api_key)
     })
     .await
     .map_err(|e| format!("Task join failed: {e}"))??;
