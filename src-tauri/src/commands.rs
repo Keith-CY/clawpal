@@ -2991,17 +2991,11 @@ pub fn resolve_api_keys() -> Result<Vec<ResolvedApiKey>, String> {
 }
 
 fn truncate_error_text(input: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    let mut count = 0usize;
-    for ch in input.chars() {
-        if count >= max_chars {
-            out.push_str("...");
-            return out;
-        }
-        out.push(ch);
-        count += 1;
+    if let Some((i, _)) = input.char_indices().nth(max_chars) {
+        format!("{}...", &input[..i])
+    } else {
+        input.to_string()
     }
-    out
 }
 
 fn default_base_url_for_provider(provider: &str) -> Option<&'static str> {
@@ -6055,7 +6049,7 @@ async fn resolve_remote_profile_api_key(
         .all(|c| c.is_ascii_alphanumeric() || c == '_')
     {
         let cmd = format!("printenv {auth_ref}");
-        if let Ok(out) = pool.exec(host_id, &cmd).await {
+        if let Ok(out) = pool.exec_login(host_id, &cmd).await {
             let key = out.stdout.trim().to_string();
             if !key.is_empty() {
                 return key;
@@ -6081,8 +6075,8 @@ pub async fn remote_test_model_profile(
         #[serde(default)]
         profiles: Vec<ModelProfile>,
     }
-    let storage: Storage =
-        serde_json::from_str(&content).unwrap_or(Storage { profiles: Vec::new() });
+    let storage: Storage = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse remote model profiles: {e}"))?;
     let profile = storage
         .profiles
         .into_iter()
