@@ -401,7 +401,7 @@ export function InstanceTabBar({
             <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={saving}>
               {t('instance.cancel')}
             </Button>
-            <Button onClick={handleSave} disabled={saving || !form.host || hasDuplicateInputName}>
+            <Button onClick={handleSave} disabled={saving || !form.host}>
               {saving ? t('instance.saving') : editingHost ? t('instance.update') : t('instance.add')}
             </Button>
           </DialogFooter>

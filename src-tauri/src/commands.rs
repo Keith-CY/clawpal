@@ -3106,34 +3106,34 @@ fn run_provider_probe(
 #[tauri::command]
 pub async fn test_model_profile(profile_id: String) -> Result<bool, String> {
     let paths = resolve_paths();
-    let profile = load_model_profiles(&paths)
-        .into_iter()
-        .find(|p| p.id == profile_id)
-        .ok_or_else(|| format!("Profile not found: {profile_id}"))?;
-
-    if !profile.enabled {
-        return Err("Profile is disabled".into());
-    }
-
-    let api_key = resolve_profile_api_key(&profile, &paths.base_dir);
-    if api_key.trim().is_empty() {
-        return Err("No API key resolved for this profile".into());
-    }
-
-    let resolved_base_url = profile
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            fs::read_to_string(&paths.config_path)
-                .ok()
-                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-                .and_then(|cfg| resolve_model_provider_base_url(&cfg, &profile.provider))
-        });
-
     tauri::async_runtime::spawn_blocking(move || {
+        let profile = load_model_profiles(&paths)
+            .into_iter()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| format!("Profile not found: {profile_id}"))?;
+
+        if !profile.enabled {
+            return Err("Profile is disabled".into());
+        }
+
+        let api_key = resolve_profile_api_key(&profile, &paths.base_dir);
+        if api_key.trim().is_empty() {
+            return Err("No API key resolved for this profile".into());
+        }
+
+        let resolved_base_url = profile
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                fs::read_to_string(&paths.config_path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                    .and_then(|cfg| resolve_model_provider_base_url(&cfg, &profile.provider))
+            });
+
         run_provider_probe(profile.provider, profile.model, resolved_base_url, api_key)
     })
     .await
@@ -6056,12 +6056,27 @@ fn is_remote_missing_path_error(error: &str) -> bool {
         || lower.contains("cannot open")
 }
 
+fn is_valid_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 async fn read_remote_env_var(
     pool: &SshConnectionPool,
     host_id: &str,
     name: &str,
 ) -> Result<Option<String>, String> {
-    let cmd = format!("printenv {name}");
+    if !is_valid_env_var_name(name) {
+        return Err(format!("Invalid environment variable name: {name}"));
+    }
+
+    let cmd = format!("printenv -- {name}");
     let out = pool
         .exec_login(host_id, &cmd)
         .await
