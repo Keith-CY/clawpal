@@ -2990,6 +2990,144 @@ pub fn resolve_api_keys() -> Result<Vec<ResolvedApiKey>, String> {
     Ok(out)
 }
 
+fn truncate_error_text(input: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut count = 0usize;
+    for ch in input.chars() {
+        if count >= max_chars {
+            out.push_str("...");
+            return out;
+        }
+        out.push(ch);
+        count += 1;
+    }
+    out
+}
+
+fn default_base_url_for_provider(provider: &str) -> Option<&'static str> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "openai" => Some("https://api.openai.com/v1"),
+        "openrouter" => Some("https://openrouter.ai/api/v1"),
+        "groq" => Some("https://api.groq.com/openai/v1"),
+        "deepseek" => Some("https://api.deepseek.com/v1"),
+        "xai" | "grok" => Some("https://api.x.ai/v1"),
+        "together" => Some("https://api.together.xyz/v1"),
+        "mistral" => Some("https://api.mistral.ai/v1"),
+        "anthropic" => Some("https://api.anthropic.com/v1"),
+        _ => None,
+    }
+}
+
+fn run_provider_probe(
+    provider: String,
+    model: String,
+    base_url: Option<String>,
+    api_key: String,
+) -> Result<(), String> {
+    let provider_trimmed = provider.trim().to_string();
+    let mut model_trimmed = model.trim().to_string();
+    if provider_trimmed.is_empty() || model_trimmed.is_empty() {
+        return Err("provider and model are required".into());
+    }
+    let provider_prefix = format!("{}/", provider_trimmed.to_ascii_lowercase());
+    if model_trimmed
+        .to_ascii_lowercase()
+        .starts_with(&provider_prefix)
+    {
+        model_trimmed = model_trimmed[provider_prefix.len()..].to_string();
+    }
+    if api_key.trim().is_empty() {
+        return Err("API key is not configured for this profile".into());
+    }
+
+    let resolved_base = base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.trim_end_matches('/').to_string())
+        .or_else(|| default_base_url_for_provider(&provider_trimmed).map(str::to_string))
+        .ok_or_else(|| format!("No base URL configured for provider '{}'", provider_trimmed))?;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+    let lower = provider_trimmed.to_ascii_lowercase();
+    let response = if lower == "anthropic" {
+        let url = format!("{}/messages", resolved_base);
+        client
+            .post(&url)
+            .header("x-api-key", api_key.trim())
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&serde_json::json!({
+                "model": model_trimmed,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}]
+            }))
+            .send()
+            .map_err(|e| format!("Provider request failed: {e}"))?
+    } else {
+        let url = format!("{}/chat/completions", resolved_base);
+        let mut req = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key.trim()))
+            .header("content-type", "application/json")
+            .json(&serde_json::json!({
+                "model": model_trimmed,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1
+            }));
+        if lower == "openrouter" {
+            req = req
+                .header("HTTP-Referer", "https://clawpal.zhixian.io")
+                .header("X-Title", "ClawPal");
+        }
+        req.send()
+            .map_err(|e| format!("Provider request failed: {e}"))?
+    };
+
+    if response.status().is_success() {
+        return Ok(());
+    }
+
+    let status = response.status().as_u16();
+    let body = response.text().unwrap_or_default();
+    let snippet = truncate_error_text(body.trim(), 280);
+    if snippet.is_empty() {
+        Err(format!("Provider rejected credentials (HTTP {status})"))
+    } else {
+        Err(format!("Provider rejected credentials (HTTP {status}): {snippet}"))
+    }
+}
+
+#[tauri::command]
+pub async fn test_model_profile(profile_id: String) -> Result<bool, String> {
+    let paths = resolve_paths();
+    let profile = load_model_profiles(&paths)
+        .into_iter()
+        .find(|p| p.id == profile_id)
+        .ok_or_else(|| format!("Profile not found: {profile_id}"))?;
+
+    if !profile.enabled {
+        return Err("Profile is disabled".into());
+    }
+
+    let api_key = resolve_profile_api_key(&profile, &paths.base_dir);
+    if api_key.trim().is_empty() {
+        return Err("No API key resolved for this profile".into());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        run_provider_probe(profile.provider, profile.model, profile.base_url, api_key)
+    })
+    .await
+    .map_err(|e| format!("Task join failed: {e}"))??;
+
+    Ok(true)
+}
+
 fn resolve_profile_api_key(profile: &ModelProfile, base_dir: &Path) -> String {
     // 1. Direct api_key field (user entered key directly in ClawPal)
     if let Some(ref key) = profile.api_key {
@@ -4602,8 +4740,8 @@ fn parse_ssh_config_hosts(data: &str) -> Vec<SshConfigHostSuggestion> {
                 );
             }
             aliases = split_host_aliases(&value)
+                .into_iter()
                 .filter(|v| !v.is_empty())
-                .map(ToOwned::to_owned)
                 .collect();
             host_name = None;
             user = None;
@@ -5890,6 +6028,83 @@ pub async fn remote_resolve_api_keys(
         });
     }
     Ok(out)
+}
+
+async fn resolve_remote_profile_api_key(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    profile: &ModelProfile,
+) -> String {
+    if let Some(key) = profile.api_key.as_ref().map(|k| k.trim().to_string()) {
+        if !key.is_empty() {
+            return key;
+        }
+    }
+
+    let auth_ref = profile.auth_ref.trim();
+    if auth_ref.is_empty() {
+        return String::new();
+    }
+
+    // Remote fallback: treat auth_ref as env var name when safe.
+    if auth_ref
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        let cmd = format!("printenv {auth_ref}");
+        if let Ok(out) = pool.exec(host_id, &cmd).await {
+            let key = out.stdout.trim().to_string();
+            if !key.is_empty() {
+                return key;
+            }
+        }
+    }
+
+    String::new()
+}
+
+#[tauri::command]
+pub async fn remote_test_model_profile(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    profile_id: String,
+) -> Result<bool, String> {
+    let content = pool
+        .sftp_read(&host_id, "~/.clawpal/model-profiles.json")
+        .await
+        .unwrap_or_else(|_| r#"{"profiles":[]}"#.to_string());
+    #[derive(serde::Deserialize)]
+    struct Storage {
+        #[serde(default)]
+        profiles: Vec<ModelProfile>,
+    }
+    let storage: Storage =
+        serde_json::from_str(&content).unwrap_or(Storage { profiles: Vec::new() });
+    let profile = storage
+        .profiles
+        .into_iter()
+        .find(|p| p.id == profile_id)
+        .ok_or_else(|| format!("Profile not found: {profile_id}"))?;
+
+    if !profile.enabled {
+        return Err("Profile is disabled".into());
+    }
+
+    let api_key = resolve_remote_profile_api_key(&pool, &host_id, &profile).await;
+    if api_key.trim().is_empty() {
+        return Err(
+            "No API key resolved for this remote profile. Set apiKey directly or export auth_ref on remote shell."
+                .into(),
+        );
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        run_provider_probe(profile.provider, profile.model, profile.base_url, api_key)
+    })
+    .await
+    .map_err(|e| format!("Task join failed: {e}"))??;
+
+    Ok(true)
 }
 
 #[tauri::command]

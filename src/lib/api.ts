@@ -30,6 +30,8 @@ export const api = {
     invoke("upsert_model_profile", { profile }),
   deleteModelProfile: (profileId: string): Promise<boolean> =>
     invoke("delete_model_profile", { profileId }),
+  testModelProfile: (profileId: string): Promise<boolean> =>
+    invoke("test_model_profile", { profileId }),
   resolveProviderAuth: (provider: string): Promise<ProviderAuthSuggestion> =>
     invoke("resolve_provider_auth", { provider }),
   resolveApiKeys: (): Promise<ResolvedApiKey[]> =>
@@ -153,6 +155,8 @@ export const api = {
     invoke("remote_upsert_model_profile", { hostId, profile }),
   remoteDeleteModelProfile: (hostId: string, profileId: string): Promise<boolean> =>
     invoke("remote_delete_model_profile", { hostId, profileId }),
+  remoteTestModelProfile: (hostId: string, profileId: string): Promise<boolean> =>
+    invoke("remote_test_model_profile", { hostId, profileId }),
   remoteResolveApiKeys: (hostId: string): Promise<ResolvedApiKey[]> =>
     invoke("remote_resolve_api_keys", { hostId }),
   remoteExtractModelProfilesFromConfig: (hostId: string): Promise<{ created: number; reused: number; skippedInvalid: number }> =>
