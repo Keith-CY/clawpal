@@ -3093,7 +3093,9 @@ fn run_provider_probe(
     }
 
     let status = response.status().as_u16();
-    let body = response.text().unwrap_or_default();
+    let body = response
+        .text()
+        .unwrap_or_else(|e| format!("(could not read response body: {e})"));
     let snippet = truncate_error_text(body.trim(), 280);
     if snippet.is_empty() {
         Err(format!("Provider rejected credentials (HTTP {status})"))
@@ -6035,9 +6037,10 @@ async fn resolve_remote_profile_api_key(
     host_id: &str,
     profile: &ModelProfile,
 ) -> String {
-    if let Some(key) = profile.api_key.as_ref().map(|k| k.trim().to_string()) {
-        if !key.is_empty() {
-            return key;
+    if let Some(key) = &profile.api_key {
+        let trimmed_key = key.trim();
+        if !trimmed_key.is_empty() {
+            return trimmed_key.to_string();
         }
     }
 

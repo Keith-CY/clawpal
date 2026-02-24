@@ -345,20 +345,23 @@ export function Settings({ onDataChange, hasAppUpdate, onAppUpdateSeen }: {
   };
 
   const toggleProfileEnabled = (profile: ModelProfile) => {
+    const nextEnabled = !profile.enabled;
     ua.upsertModelProfile({
       ...profile,
-      enabled: !profile.enabled,
+      enabled: nextEnabled,
     })
       .then(() => {
-        setMessage(
-          profile.enabled
-            ? t('settings.profileDisabledMessage', { name: `${profile.provider}/${profile.model}` })
-            : t('settings.profileEnabledMessage', { name: `${profile.provider}/${profile.model}` }),
-        );
+        const message = nextEnabled
+          ? t('settings.profileEnabledMessage', { name: `${profile.provider}/${profile.model}` })
+          : t('settings.profileDisabledMessage', { name: `${profile.provider}/${profile.model}` });
+        toast.success(message);
         refreshProfiles();
         onDataChange?.();
       })
-      .catch((e) => setMessage(t('settings.saveFailed', { error: String(e) })));
+      .catch((e) => {
+        const errorText = e instanceof Error ? e.message : String(e);
+        toast.error(t('settings.saveFailed', { error: errorText }));
+      });
   };
 
   const testProfile = async (profile: ModelProfile) => {
