@@ -2998,6 +2998,8 @@ fn truncate_error_text(input: &str, max_chars: usize) -> String {
     }
 }
 
+const MAX_ERROR_SNIPPET_CHARS: usize = 280;
+
 fn default_base_url_for_provider(provider: &str) -> Option<&'static str> {
     match provider.trim().to_ascii_lowercase().as_str() {
         "openai" => Some("https://api.openai.com/v1"),
@@ -3093,7 +3095,7 @@ fn run_provider_probe(
     let body = response
         .text()
         .unwrap_or_else(|e| format!("(could not read response body: {e})"));
-    let snippet = truncate_error_text(body.trim(), 280);
+    let snippet = truncate_error_text(body.trim(), MAX_ERROR_SNIPPET_CHARS);
     if snippet.is_empty() {
         Err(format!("Provider rejected credentials (HTTP {status})"))
     } else {

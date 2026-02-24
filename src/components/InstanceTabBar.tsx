@@ -69,7 +69,7 @@ export function InstanceTabBar({
   const duplicateDisplayNames = useMemo(() => {
     const counts = new Map<string, number>();
     for (const host of hosts) {
-      const key = (host.label || host.host).trim();
+      const key = (host.label || host.host).trim().toLowerCase();
       counts.set(key, (counts.get(key) || 0) + 1);
     }
     return counts;
@@ -171,7 +171,7 @@ export function InstanceTabBar({
 
   const hostDisplayName = (host: SshHost) => {
     const base = (host.label || host.host).trim();
-    const duplicate = (duplicateDisplayNames.get(base) || 0) > 1;
+    const duplicate = (duplicateDisplayNames.get(base.toLowerCase()) || 0) > 1;
     if (!duplicate) return base;
     const userPrefix = host.username ? `${host.username}@` : "";
     return `${base} (${userPrefix}${host.host}:${host.port})`;
