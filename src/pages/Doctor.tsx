@@ -4,7 +4,7 @@ import { api } from "@/lib/api";
 import { useApi } from "@/lib/use-api";
 import { useInstance } from "@/lib/instance-context";
 import { useDoctorAgent } from "@/lib/use-doctor-agent";
-import type { SshHost } from "@/lib/types";
+import type { RescuePrimaryDiagnosisResult, SshHost } from "@/lib/types";
 import {
   Card,
   CardHeader,
@@ -57,6 +57,9 @@ export function Doctor({ sshHosts }: DoctorProps) {
   const [rescuePort, setRescuePort] = useState<number | null>(null);
   const [rescueMessage, setRescueMessage] = useState<string | null>(null);
   const [rescueMessageTone, setRescueMessageTone] = useState<"info" | "success" | "error">("info");
+  const [primaryCheckLoading, setPrimaryCheckLoading] = useState(false);
+  const [primaryCheckResult, setPrimaryCheckResult] = useState<RescuePrimaryDiagnosisResult | null>(null);
+  const [primaryCheckError, setPrimaryCheckError] = useState<string | null>(null);
 
   // Reset doctor agent when switching instances
   useEffect(() => {
@@ -67,6 +70,8 @@ export function Doctor({ sshHosts }: DoctorProps) {
     setRescueConfigured(null);
     setRescueProfile("rescue");
     setRescuePort(null);
+    setPrimaryCheckResult(null);
+    setPrimaryCheckError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instanceId]);
 
@@ -258,6 +263,37 @@ export function Doctor({ sshHosts }: DoctorProps) {
     }
   };
 
+  const handleCheckPrimaryViaRescue = async () => {
+    if (isRemote && !isConnected) {
+      setPrimaryCheckError(t("doctor.rescueBotConnectRequired"));
+      return;
+    }
+    setPrimaryCheckLoading(true);
+    setPrimaryCheckError(null);
+    try {
+      const result = await ua.diagnosePrimaryViaRescue("primary", rescueProfile);
+      setPrimaryCheckResult(result);
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      setPrimaryCheckResult(null);
+      setPrimaryCheckError(t("doctor.primaryCheckFailed", { error: text }));
+    } finally {
+      setPrimaryCheckLoading(false);
+    }
+  };
+
+  const primaryStatusLabel = (status: RescuePrimaryDiagnosisResult["status"]) => {
+    if (status === "healthy") return t("doctor.primaryStatusHealthy");
+    if (status === "degraded") return t("doctor.primaryStatusDegraded");
+    return t("doctor.primaryStatusBroken");
+  };
+
+  const formatCheckedAt = (checkedAt: string) => {
+    const value = new Date(checkedAt);
+    if (Number.isNaN(value.getTime())) return checkedAt;
+    return value.toLocaleString();
+  };
+
   useEffect(() => {
     void refreshRescueStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -327,6 +363,102 @@ export function Doctor({ sshHosts }: DoctorProps) {
                   </Button>
                 </div>
               )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card className="mb-4 gap-2 py-4">
+        <CardHeader className="pb-0">
+          <CardTitle className="text-base">{t("doctor.primaryRecoveryTitle")}</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <p className="text-sm text-muted-foreground">{t("doctor.primaryRecoveryHint")}</p>
+            <Button
+              variant="default"
+              size="sm"
+              onClick={handleCheckPrimaryViaRescue}
+              disabled={primaryCheckLoading || (isRemote && !isConnected)}
+            >
+              {primaryCheckLoading
+                ? t("doctor.primaryChecking")
+                : t("doctor.primaryCheckNow")}
+            </Button>
+          </div>
+          {primaryCheckError && (
+            <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              <div>{primaryCheckError}</div>
+              <div className="mt-2">
+                <Button variant="outline" size="sm" onClick={() => openLogs("gateway")}>
+                  {t("doctor.viewGatewayLogs")}
+                </Button>
+              </div>
+            </div>
+          )}
+          {primaryCheckResult && (
+            <div className="mt-3 rounded-md border border-border/60 bg-muted/20 px-3 py-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="text-sm">
+                  {t("doctor.primaryCheckedAt", { time: formatCheckedAt(primaryCheckResult.checkedAt) })}
+                </div>
+                <Badge
+                  variant={primaryCheckResult.status === "healthy" ? "outline" : "destructive"}
+                  className={primaryCheckResult.status === "healthy" ? "border-emerald-500/40 text-emerald-700 dark:text-emerald-300" : undefined}
+                >
+                  {primaryStatusLabel(primaryCheckResult.status)}
+                </Badge>
+              </div>
+              <div className="mt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                {t("doctor.primaryChecks")}
+              </div>
+              <div className="mt-2 grid gap-2">
+                {primaryCheckResult.checks.map((check) => (
+                  <div key={check.id} className="rounded-md border border-border/50 bg-background/60 p-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-sm">{check.title}</div>
+                      <Badge variant={check.ok ? "outline" : "destructive"} className="text-[10px]">
+                        {check.ok ? t("doctor.primaryCheckPass") : t("doctor.primaryCheckFail")}
+                      </Badge>
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">{check.detail}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                {t("doctor.primaryIssues")}
+              </div>
+              {primaryCheckResult.issues.length === 0 ? (
+                <div className="mt-2 text-sm text-emerald-700 dark:text-emerald-300">
+                  {t("doctor.primaryNoIssues")}
+                </div>
+              ) : (
+                <div className="mt-2 grid gap-2">
+                  {primaryCheckResult.issues.map((issue) => (
+                    <div key={issue.id} className="rounded-md border border-destructive/30 bg-destructive/5 p-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-sm">{issue.message}</div>
+                        <div className="flex items-center gap-1">
+                          <Badge variant="outline" className="text-[10px]">
+                            {issue.source === "rescue"
+                              ? t("doctor.primaryIssueSourceRescue")
+                              : t("doctor.primaryIssueSourcePrimary")}
+                          </Badge>
+                          <Badge variant={issue.severity === "error" ? "destructive" : "outline"} className="text-[10px]">
+                            {issue.severity}
+                          </Badge>
+                        </div>
+                      </div>
+                      {issue.fixHint && (
+                        <div className="mt-1 text-xs text-muted-foreground">{issue.fixHint}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="mt-3 text-xs text-muted-foreground">
+                {t("doctor.primaryRepairComingSoon")}
+              </div>
             </div>
           )}
         </CardContent>

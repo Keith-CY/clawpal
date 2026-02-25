@@ -294,6 +294,34 @@ export interface RescueBotManageResult {
   commands: RescueBotCommandResult[];
 }
 
+export interface RescuePrimaryCheckItem {
+  id: string;
+  title: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface RescuePrimaryIssue {
+  id: string;
+  code: string;
+  severity: "error" | "warn" | "info";
+  message: string;
+  autoFixable: boolean;
+  fixHint?: string;
+  source: "rescue" | "primary";
+}
+
+export interface RescuePrimaryDiagnosisResult {
+  status: "healthy" | "degraded" | "broken";
+  checkedAt: string;
+  targetProfile: string;
+  rescueProfile: string;
+  rescueConfigured: boolean;
+  rescuePort?: number;
+  checks: RescuePrimaryCheckItem[];
+  issues: RescuePrimaryIssue[];
+}
+
 // Cron
 
 export type WatchdogJobStatus = "ok" | "pending" | "triggered" | "retrying" | "escalated";

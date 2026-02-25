@@ -316,6 +316,10 @@ export function useApi() {
         dispatch(api.manageRescueBot, api.remoteManageRescueBot),
         ["getInstanceStatus", "getStatusExtra"],
       ),
+      diagnosePrimaryViaRescue: dispatch(
+        api.diagnosePrimaryViaRescue,
+        api.remoteDiagnosePrimaryViaRescue,
+      ),
 
       // Doctor
       runDoctor: dispatch(api.runDoctor, api.remoteRunDoctor),
