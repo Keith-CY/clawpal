@@ -51,13 +51,22 @@ export function Doctor({ sshHosts }: DoctorProps) {
   const [logsLoading, setLogsLoading] = useState(false);
   const logsContentRef = useRef<HTMLPreElement>(null);
   const [rescueActivating, setRescueActivating] = useState(false);
+  const [rescueStatusChecking, setRescueStatusChecking] = useState(false);
+  const [rescueConfigured, setRescueConfigured] = useState<boolean | null>(null);
+  const [rescueProfile, setRescueProfile] = useState("rescue");
+  const [rescuePort, setRescuePort] = useState<number | null>(null);
   const [rescueMessage, setRescueMessage] = useState<string | null>(null);
+  const [rescueMessageTone, setRescueMessageTone] = useState<"info" | "success" | "error">("info");
 
   // Reset doctor agent when switching instances
   useEffect(() => {
     doctor.reset();
     doctor.disconnect();
     setRescueMessage(null);
+    setRescueMessageTone("info");
+    setRescueConfigured(null);
+    setRescueProfile("rescue");
+    setRescuePort(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instanceId]);
 
@@ -168,37 +177,91 @@ export function Doctor({ sshHosts }: DoctorProps) {
     setLogsOpen(true);
   };
 
-  const handleActivateRescueBot = async () => {
+  const refreshRescueStatus = async () => {
     if (isRemote && !isConnected) {
+      setRescueConfigured(null);
+      setRescuePort(null);
       setRescueMessage(t("doctor.rescueBotConnectRequired"));
+      setRescueMessageTone("info");
       return;
     }
-    setRescueActivating(true);
-    setRescueMessage(null);
+
+    setRescueStatusChecking(true);
     try {
-      const result = await ua.manageRescueBot("activate");
+      const result = await ua.manageRescueBot("status");
+      setRescueConfigured(result.wasAlreadyConfigured);
+      setRescueProfile(result.profile);
+      setRescuePort(result.wasAlreadyConfigured ? result.rescuePort : null);
       if (result.wasAlreadyConfigured) {
         setRescueMessage(
-          t("doctor.rescueBotActivatedConfigured", {
+          t("doctor.rescueBotAlreadyConfiguredState", {
             profile: result.profile,
             port: result.rescuePort,
           }),
         );
       } else {
-        setRescueMessage(
-          t("doctor.rescueBotActivated", {
-            profile: result.profile,
-            port: result.rescuePort,
-          }),
-        );
+        setRescueMessage(t("doctor.rescueBotNotConfigured"));
       }
+      setRescueMessageTone("info");
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      setRescueMessage(t("doctor.rescueBotFailed", { error: text }));
+      setRescueConfigured(null);
+      setRescuePort(null);
+      setRescueMessage(t("doctor.rescueBotStatusCheckFailed", { error: text }));
+      setRescueMessageTone("error");
+    } finally {
+      setRescueStatusChecking(false);
+    }
+  };
+
+  const handleActivateRescueBot = async () => {
+    if (isRemote && !isConnected) {
+      setRescueMessage(t("doctor.rescueBotConnectRequired"));
+      setRescueMessageTone("error");
+      return;
+    }
+    if (rescueConfigured && rescuePort !== null) {
+      setRescueMessage(
+        t("doctor.rescueBotAlreadyConfiguredState", {
+          profile: rescueProfile,
+          port: rescuePort,
+        }),
+      );
+      setRescueMessageTone("info");
+      return;
+    }
+    setRescueActivating(true);
+    setRescueMessage(null);
+    setRescueMessageTone("info");
+    try {
+      const result = await ua.manageRescueBot("activate");
+      setRescueConfigured(true);
+      setRescueProfile(result.profile);
+      setRescuePort(result.rescuePort);
+      setRescueMessage(
+        t("doctor.rescueBotActivated", {
+          profile: result.profile,
+          port: result.rescuePort,
+        }),
+      );
+      setRescueMessageTone("success");
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      if (text.includes("Gateway restart timed out")) {
+        setRescueMessage(t("doctor.rescueBotFailedTimeout", { error: text }));
+      } else {
+        setRescueMessage(t("doctor.rescueBotFailed", { error: text }));
+      }
+      setRescueMessageTone("error");
     } finally {
       setRescueActivating(false);
     }
   };
+
+  useEffect(() => {
+    void refreshRescueStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instanceId, isRemote, isConnected]);
 
   useEffect(() => {
     if (logsOpen) fetchLog(logsSource, logsTab);
@@ -216,19 +279,55 @@ export function Doctor({ sshHosts }: DoctorProps) {
         <CardContent>
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <p className="text-sm text-muted-foreground">{t("doctor.rescueBotHint")}</p>
-            <Button
-              variant="default"
-              size="sm"
-              onClick={handleActivateRescueBot}
-              disabled={rescueActivating || (isRemote && !isConnected)}
-            >
-              {rescueActivating
-                ? t("doctor.activatingRescueBot")
-                : t("doctor.activateRescueBot")}
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant={rescueConfigured ? "secondary" : "default"}
+                size="sm"
+                onClick={handleActivateRescueBot}
+                disabled={
+                  rescueActivating
+                  || rescueStatusChecking
+                  || rescueConfigured === true
+                  || (isRemote && !isConnected)
+                }
+              >
+                {rescueStatusChecking
+                  ? t("doctor.rescueBotChecking")
+                  : rescueActivating
+                    ? t("doctor.activatingRescueBot")
+                    : rescueConfigured
+                      ? t("doctor.rescueBotAlreadyConfigured")
+                      : t("doctor.activateRescueBot")}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={refreshRescueStatus}
+                disabled={rescueActivating || rescueStatusChecking || (isRemote && !isConnected)}
+              >
+                {t("doctor.refresh")}
+              </Button>
+            </div>
           </div>
           {rescueMessage && (
-            <div className="mt-3 text-sm text-muted-foreground">{rescueMessage}</div>
+            <div
+              className={`mt-3 rounded-md border px-3 py-2 text-sm ${
+                rescueMessageTone === "error"
+                  ? "border-destructive/40 bg-destructive/10 text-destructive"
+                  : rescueMessageTone === "success"
+                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                    : "border-border/50 bg-muted/40 text-muted-foreground"
+              }`}
+            >
+              <div>{rescueMessage}</div>
+              {rescueMessageTone === "error" && (
+                <div className="mt-2">
+                  <Button variant="outline" size="sm" onClick={() => openLogs("gateway")}>
+                    {t("doctor.viewGatewayLogs")}
+                  </Button>
+                </div>
+              )}
+            </div>
           )}
         </CardContent>
       </Card>

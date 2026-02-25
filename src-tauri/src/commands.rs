@@ -1893,12 +1893,28 @@ pub async fn manage_rescue_bot(
             ensure_rescue_port_spacing(main_port, rescue_port)?;
         }
 
+        if action == RescueBotAction::Status && !already_configured {
+            return Ok(RescueBotManageResult {
+                action: action.as_str().into(),
+                profile,
+                main_port,
+                rescue_port,
+                min_recommended_port,
+                was_already_configured: false,
+                commands: Vec::new(),
+            });
+        }
+
         let plan = build_rescue_bot_command_plan(action, &profile, rescue_port, should_configure);
         let mut commands = Vec::new();
 
         for command in plan {
             let result = run_local_rescue_bot_command(command)?;
             if result.output.exit_code != 0 {
+                if action == RescueBotAction::Status {
+                    commands.push(result);
+                    break;
+                }
                 if action == RescueBotAction::Activate
                     && is_gateway_restart_command(&result.command)
                     && is_gateway_restart_timeout(&result.output)
@@ -5690,11 +5706,27 @@ pub async fn remote_manage_rescue_bot(
         ensure_rescue_port_spacing(main_port, rescue_port)?;
     }
 
+    if action == RescueBotAction::Status && !already_configured {
+        return Ok(RescueBotManageResult {
+            action: action.as_str().into(),
+            profile,
+            main_port,
+            rescue_port,
+            min_recommended_port,
+            was_already_configured: false,
+            commands: Vec::new(),
+        });
+    }
+
     let plan = build_rescue_bot_command_plan(action, &profile, rescue_port, should_configure);
     let mut commands = Vec::new();
     for command in plan {
         let result = run_remote_rescue_bot_command(&pool, &host_id, command).await?;
         if result.output.exit_code != 0 {
+            if action == RescueBotAction::Status {
+                commands.push(result);
+                break;
+            }
             if action == RescueBotAction::Activate
                 && is_gateway_restart_command(&result.command)
                 && is_gateway_restart_timeout(&result.output)
