@@ -2366,7 +2366,12 @@ fn run_local_gateway_restart_fallback(
 
 fn run_openclaw_dynamic(args: &[String]) -> Result<OpenclawCommandOutput, String> {
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_openclaw_raw(&refs)
+    let output = crate::cli_runner::run_openclaw(&refs)?;
+    Ok(OpenclawCommandOutput {
+        stdout: output.stdout,
+        stderr: output.stderr,
+        exit_code: output.exit_code,
+    })
 }
 
 async fn resolve_remote_rescue_profile_state(
