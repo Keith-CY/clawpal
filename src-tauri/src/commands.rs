@@ -128,12 +128,31 @@ pub struct ModelCatalogProviderCache {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenclawCommandOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RescueBotCommandResult {
+    pub command: Vec<String>,
+    pub output: OpenclawCommandOutput,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RescueBotManageResult {
+    pub action: String,
+    pub profile: String,
+    pub main_port: u16,
+    pub rescue_port: u16,
+    pub min_recommended_port: u16,
+    pub was_already_configured: bool,
+    pub commands: Vec<RescueBotCommandResult>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1842,6 +1861,66 @@ pub async fn restart_gateway() -> Result<bool, String> {
 }
 
 #[tauri::command]
+pub async fn manage_rescue_bot(
+    action: String,
+    profile: Option<String>,
+    rescue_port: Option<u16>,
+) -> Result<RescueBotManageResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let action = RescueBotAction::parse(&action)?;
+        let profile = profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .unwrap_or("rescue")
+            .to_string();
+
+        let main_port = read_openclaw_config(&resolve_paths())
+            .map(|cfg| resolve_gateway_port_from_config(&cfg))
+            .unwrap_or(18789);
+        let (already_configured, existing_port) = resolve_local_rescue_profile_state(&profile)?;
+        let should_configure = !already_configured || action == RescueBotAction::Set;
+        let rescue_port = if should_configure {
+            rescue_port.unwrap_or_else(|| suggest_rescue_port(main_port))
+        } else {
+            existing_port
+                .or(rescue_port)
+                .unwrap_or_else(|| suggest_rescue_port(main_port))
+        };
+        let min_recommended_port = main_port.saturating_add(20);
+
+        if should_configure && matches!(action, RescueBotAction::Set | RescueBotAction::Activate) {
+            ensure_rescue_port_spacing(main_port, rescue_port)?;
+        }
+
+        let plan = build_rescue_bot_command_plan(action, &profile, rescue_port, should_configure);
+        let mut commands = Vec::new();
+
+        for command in plan {
+            let output = run_openclaw_dynamic(&command)?;
+            let result = RescueBotCommandResult {
+                command: command.clone(),
+                output,
+            };
+            if result.output.exit_code != 0 {
+                return Err(command_failure_message(&result.command, &result.output));
+            }
+            commands.push(result);
+        }
+
+        Ok(RescueBotManageResult {
+            action: action.as_str().into(),
+            profile,
+            main_port,
+            rescue_port,
+            min_recommended_port,
+            was_already_configured: already_configured,
+            commands,
+        })
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub fn list_history(limit: usize, offset: usize) -> Result<HistoryPage, String> {
     let paths = resolve_paths();
     let index = list_snapshots(&paths.metadata_path)?;
@@ -2043,6 +2122,212 @@ fn collect_model_summary(cfg: &Value) -> ModelSummary {
         agent_overrides,
         channel_overrides: collect_channel_model_overrides(cfg),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RescueBotAction {
+    Set,
+    Activate,
+    Status,
+    Deactivate,
+}
+
+impl RescueBotAction {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "set" | "configure" => Ok(Self::Set),
+            "activate" | "start" => Ok(Self::Activate),
+            "status" => Ok(Self::Status),
+            "deactivate" | "stop" => Ok(Self::Deactivate),
+            _ => Err("action must be one of: set, activate, status, deactivate".into()),
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Set => "set",
+            Self::Activate => "activate",
+            Self::Status => "status",
+            Self::Deactivate => "deactivate",
+        }
+    }
+}
+
+fn resolve_gateway_port_from_config(cfg: &Value) -> u16 {
+    cfg.pointer("/gateway/port")
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .unwrap_or(18789)
+}
+
+fn suggest_rescue_port(main_port: u16) -> u16 {
+    // Keep trailing digits stable (18789 -> 19789) while preserving at least +20 gap.
+    let with_large_gap = main_port.saturating_add(1000);
+    let min_gap = main_port.saturating_add(20);
+    with_large_gap.max(min_gap)
+}
+
+fn ensure_rescue_port_spacing(main_port: u16, rescue_port: u16) -> Result<(), String> {
+    let min_recommended_port = main_port.saturating_add(20);
+    if rescue_port < min_recommended_port {
+        return Err(format!(
+            "rescue port {rescue_port} is too close to primary gateway port {main_port}; \
+             choose at least {min_recommended_port} (>= +20)"
+        ));
+    }
+    Ok(())
+}
+
+fn parse_rescue_port_value(value: &Value) -> Option<u16> {
+    match value {
+        Value::Number(n) => n.as_u64().and_then(|v| u16::try_from(v).ok()),
+        Value::String(s) => s.trim().parse::<u16>().ok(),
+        _ => None,
+    }
+}
+
+fn resolve_local_rescue_profile_state(profile: &str) -> Result<(bool, Option<u16>), String> {
+    let output = crate::cli_runner::run_openclaw(&[
+        "--profile",
+        profile,
+        "config",
+        "get",
+        "gateway.port",
+        "--json",
+    ])?;
+    if output.exit_code != 0 {
+        return Ok((false, None));
+    }
+    let port = crate::cli_runner::parse_json_output(&output)
+        .ok()
+        .and_then(|value| parse_rescue_port_value(&value));
+    Ok((true, port))
+}
+
+fn build_rescue_bot_command_plan(
+    action: RescueBotAction,
+    profile: &str,
+    rescue_port: u16,
+    include_configure: bool,
+) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+    let profile_arg = vec!["--profile".to_string(), profile.to_string()];
+    let rescue_port_str = rescue_port.to_string();
+
+    match action {
+        RescueBotAction::Set => {
+            if include_configure {
+                commands.push({
+                    let mut cmd = profile_arg.clone();
+                    cmd.push("setup".into());
+                    cmd
+                });
+                commands.push({
+                    let mut cmd = profile_arg.clone();
+                    cmd.extend([
+                        "config".into(),
+                        "set".into(),
+                        "gateway.port".into(),
+                        rescue_port_str,
+                        "--json".into(),
+                    ]);
+                    cmd
+                });
+            }
+        }
+        RescueBotAction::Activate => {
+            commands.extend(build_rescue_bot_command_plan(
+                RescueBotAction::Set,
+                profile,
+                rescue_port,
+                include_configure,
+            ));
+            commands.push({
+                let mut cmd = profile_arg.clone();
+                cmd.extend(["gateway".into(), "install".into()]);
+                cmd
+            });
+            commands.push({
+                let mut cmd = profile_arg.clone();
+                cmd.extend(["gateway".into(), "restart".into()]);
+                cmd
+            });
+            commands.push({
+                let mut cmd = profile_arg.clone();
+                cmd.extend(["gateway".into(), "status".into(), "--json".into()]);
+                cmd
+            });
+        }
+        RescueBotAction::Status => {
+            commands.push({
+                let mut cmd = profile_arg.clone();
+                cmd.extend(["gateway".into(), "status".into(), "--json".into()]);
+                cmd
+            });
+        }
+        RescueBotAction::Deactivate => {
+            commands.push({
+                let mut cmd = profile_arg.clone();
+                cmd.extend(["gateway".into(), "stop".into()]);
+                cmd
+            });
+            commands.push({
+                let mut cmd = profile_arg;
+                cmd.extend(["gateway".into(), "status".into(), "--json".into()]);
+                cmd
+            });
+        }
+    }
+
+    commands
+}
+
+fn command_failure_message(command: &[String], output: &OpenclawCommandOutput) -> String {
+    let details = if !output.stderr.trim().is_empty() {
+        output.stderr.trim()
+    } else if !output.stdout.trim().is_empty() {
+        output.stdout.trim()
+    } else {
+        "no output"
+    };
+    format!(
+        "openclaw {} failed (exit {}): {}",
+        command.join(" "),
+        output.exit_code,
+        details
+    )
+}
+
+fn run_openclaw_dynamic(args: &[String]) -> Result<OpenclawCommandOutput, String> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_openclaw_raw(&refs)
+}
+
+async fn resolve_remote_rescue_profile_state(
+    pool: &SshConnectionPool,
+    host_id: &str,
+    profile: &str,
+) -> Result<(bool, Option<u16>), String> {
+    let output = crate::cli_runner::run_openclaw_remote(
+        pool,
+        host_id,
+        &[
+            "--profile",
+            profile,
+            "config",
+            "get",
+            "gateway.port",
+            "--json",
+        ],
+    )
+    .await?;
+    if output.exit_code != 0 {
+        return Ok((false, None));
+    }
+    let port = crate::cli_runner::parse_json_output(&output)
+        .ok()
+        .and_then(|value| parse_rescue_port_value(&value));
+    Ok((true, port))
 }
 
 
@@ -3609,6 +3894,70 @@ mod model_value_tests {
             profile_to_model_value(&p),
             "openrouter/moonshotai/kimi-k2.5",
         );
+    }
+}
+
+#[cfg(test)]
+mod rescue_bot_tests {
+    use super::*;
+
+    #[test]
+    fn test_suggest_rescue_port_prefers_large_gap() {
+        assert_eq!(suggest_rescue_port(18789), 19789);
+    }
+
+    #[test]
+    fn test_ensure_rescue_port_spacing_rejects_small_gap() {
+        let err = ensure_rescue_port_spacing(18789, 18800).unwrap_err();
+        assert!(err.contains("at least 20"));
+    }
+
+    #[test]
+    fn test_build_rescue_bot_command_plan_for_activate() {
+        let commands = build_rescue_bot_command_plan(
+            RescueBotAction::Activate,
+            "rescue",
+            19789,
+            true,
+        );
+        let expected = vec![
+            vec!["--profile", "rescue", "setup"],
+            vec![
+                "--profile",
+                "rescue",
+                "config",
+                "set",
+                "gateway.port",
+                "19789",
+                "--json",
+            ],
+            vec!["--profile", "rescue", "gateway", "install"],
+            vec!["--profile", "rescue", "gateway", "restart"],
+            vec!["--profile", "rescue", "gateway", "status", "--json"],
+        ]
+        .into_iter()
+        .map(|items| items.into_iter().map(String::from).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+        assert_eq!(commands, expected);
+    }
+
+    #[test]
+    fn test_build_rescue_bot_command_plan_for_activate_without_reconfigure() {
+        let commands = build_rescue_bot_command_plan(
+            RescueBotAction::Activate,
+            "rescue",
+            19789,
+            false,
+        );
+        let expected = vec![
+            vec!["--profile", "rescue", "gateway", "install"],
+            vec!["--profile", "rescue", "gateway", "restart"],
+            vec!["--profile", "rescue", "gateway", "status", "--json"],
+        ]
+        .into_iter()
+        .map(|items| items.into_iter().map(String::from).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+        assert_eq!(commands, expected);
     }
 }
 
@@ -5195,6 +5544,80 @@ pub async fn remote_restart_gateway(
 ) -> Result<bool, String> {
     pool.exec_login(&host_id, "openclaw gateway restart").await?;
     Ok(true)
+}
+
+#[tauri::command]
+pub async fn remote_manage_rescue_bot(
+    pool: State<'_, SshConnectionPool>,
+    host_id: String,
+    action: String,
+    profile: Option<String>,
+    rescue_port: Option<u16>,
+) -> Result<RescueBotManageResult, String> {
+    let action = RescueBotAction::parse(&action)?;
+    let profile = profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .unwrap_or("rescue")
+        .to_string();
+
+    let main_port = pool
+        .sftp_read(&host_id, "~/.openclaw/openclaw.json")
+        .await
+        .ok()
+        .and_then(|raw| json5::from_str::<Value>(&raw).ok())
+        .map(|cfg| resolve_gateway_port_from_config(&cfg))
+        .unwrap_or(18789);
+    let (already_configured, existing_port) =
+        resolve_remote_rescue_profile_state(&pool, &host_id, &profile).await?;
+    let should_configure = !already_configured || action == RescueBotAction::Set;
+    let rescue_port = if should_configure {
+        rescue_port.unwrap_or_else(|| suggest_rescue_port(main_port))
+    } else {
+        existing_port
+            .or(rescue_port)
+            .unwrap_or_else(|| suggest_rescue_port(main_port))
+    };
+    let min_recommended_port = main_port.saturating_add(20);
+
+    if should_configure && matches!(action, RescueBotAction::Set | RescueBotAction::Activate) {
+        ensure_rescue_port_spacing(main_port, rescue_port)?;
+    }
+
+    let plan = build_rescue_bot_command_plan(action, &profile, rescue_port, should_configure);
+    let mut commands = Vec::new();
+    for command in plan {
+        let mut remote_cmd = String::from("openclaw");
+        for arg in &command {
+            remote_cmd.push(' ');
+            remote_cmd.push_str(&shell_escape(arg));
+        }
+        let raw = pool.exec_login(&host_id, &remote_cmd).await?;
+        let output = OpenclawCommandOutput {
+            stdout: raw.stdout,
+            stderr: raw.stderr,
+            exit_code: raw.exit_code as i32,
+        };
+        let result = RescueBotCommandResult {
+            command: command.clone(),
+            output,
+        };
+        if result.output.exit_code != 0 {
+            return Err(command_failure_message(&result.command, &result.output));
+        }
+        commands.push(result);
+    }
+
+    Ok(RescueBotManageResult {
+        action: action.as_str().into(),
+        profile,
+        main_port,
+        rescue_port,
+        min_recommended_port,
+        was_already_configured: already_configured,
+        commands,
+    })
 }
 
 

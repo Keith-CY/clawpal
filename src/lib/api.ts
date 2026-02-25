@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentOverview, AgentSessionAnalysis, ApplyQueueResult, ApplyResult, BackupInfo, Binding, ChannelNode, CronJob, CronRun, DiscordGuildChannel, GatewayCredentials, HistoryItem, InstanceStatus, StatusExtra, ModelCatalogProvider, ModelProfile, PendingCommand, PreviewQueueResult, PreviewResult, ProviderAuthSuggestion, Recipe, ResolvedApiKey, SshConfigHostSuggestion, SystemStatus, DoctorReport, SessionFile, SshHost, WatchdogStatus } from "./types";
+import type { AgentOverview, AgentSessionAnalysis, ApplyQueueResult, ApplyResult, BackupInfo, Binding, ChannelNode, CronJob, CronRun, DiscordGuildChannel, GatewayCredentials, HistoryItem, InstanceStatus, StatusExtra, ModelCatalogProvider, ModelProfile, PendingCommand, PreviewQueueResult, PreviewResult, ProviderAuthSuggestion, Recipe, RescueBotAction, RescueBotManageResult, ResolvedApiKey, SshConfigHostSuggestion, SystemStatus, DoctorReport, SessionFile, SshHost, WatchdogStatus } from "./types";
 
 export const api = {
   getSystemStatus: (): Promise<SystemStatus> =>
@@ -80,6 +80,8 @@ export const api = {
     invoke("refresh_discord_guild_channels", {}),
   restartGateway: (): Promise<boolean> =>
     invoke("restart_gateway", {}),
+  manageRescueBot: (action: RescueBotAction, profile?: string, rescuePort?: number): Promise<RescueBotManageResult> =>
+    invoke("manage_rescue_bot", { action, profile: profile ?? null, rescuePort: rescuePort ?? null }),
   setGlobalModel: (modelValue: string | null): Promise<boolean> =>
     invoke("set_global_model", { modelValue }),
   setAgentModel: (agentId: string, modelValue: string | null): Promise<boolean> =>
@@ -121,6 +123,8 @@ export const api = {
     invoke("remote_list_bindings", { hostId }),
   remoteRestartGateway: (hostId: string): Promise<boolean> =>
     invoke("remote_restart_gateway", { hostId }),
+  remoteManageRescueBot: (hostId: string, action: RescueBotAction, profile?: string, rescuePort?: number): Promise<RescueBotManageResult> =>
+    invoke("remote_manage_rescue_bot", { hostId, action, profile: profile ?? null, rescuePort: rescuePort ?? null }),
   remoteApplyConfigPatch: (hostId: string, patchTemplate: string, params: Record<string, string>): Promise<ApplyResult> =>
     invoke("remote_apply_config_patch", { hostId, patchTemplate, params }),
   remoteListDiscordGuildChannels: (hostId: string): Promise<DiscordGuildChannel[]> =>

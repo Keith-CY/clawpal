@@ -273,6 +273,27 @@ export interface SftpEntry {
   size: number;
 }
 
+export type RescueBotAction = "set" | "activate" | "status" | "deactivate";
+
+export interface RescueBotCommandResult {
+  command: string[];
+  output: {
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+  };
+}
+
+export interface RescueBotManageResult {
+  action: RescueBotAction;
+  profile: string;
+  mainPort: number;
+  rescuePort: number;
+  minRecommendedPort: number;
+  wasAlreadyConfigured: boolean;
+  commands: RescueBotCommandResult[];
+}
+
 // Cron
 
 export type WatchdogJobStatus = "ok" | "pending" | "triggered" | "retrying" | "escalated";

@@ -50,11 +50,14 @@ export function Doctor({ sshHosts }: DoctorProps) {
   const [logsContent, setLogsContent] = useState("");
   const [logsLoading, setLogsLoading] = useState(false);
   const logsContentRef = useRef<HTMLPreElement>(null);
+  const [rescueActivating, setRescueActivating] = useState(false);
+  const [rescueMessage, setRescueMessage] = useState<string | null>(null);
 
   // Reset doctor agent when switching instances
   useEffect(() => {
     doctor.reset();
     doctor.disconnect();
+    setRescueMessage(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instanceId]);
 
@@ -165,6 +168,34 @@ export function Doctor({ sshHosts }: DoctorProps) {
     setLogsOpen(true);
   };
 
+  const handleActivateRescueBot = async () => {
+    setRescueActivating(true);
+    setRescueMessage(null);
+    try {
+      const result = await ua.manageRescueBot("activate");
+      if (result.wasAlreadyConfigured) {
+        setRescueMessage(
+          t("doctor.rescueBotActivatedConfigured", {
+            profile: result.profile,
+            port: result.rescuePort,
+          }),
+        );
+      } else {
+        setRescueMessage(
+          t("doctor.rescueBotActivated", {
+            profile: result.profile,
+            port: result.rescuePort,
+          }),
+        );
+      }
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      setRescueMessage(t("doctor.rescueBotFailed", { error: text }));
+    } finally {
+      setRescueActivating(false);
+    }
+  };
+
   useEffect(() => {
     if (logsOpen) fetchLog(logsSource, logsTab);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -179,6 +210,16 @@ export function Doctor({ sshHosts }: DoctorProps) {
           <div className="flex items-center justify-between">
             <CardTitle className="text-base">{t("doctor.agentSource")}</CardTitle>
             <div className="flex items-center gap-1">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleActivateRescueBot}
+                disabled={rescueActivating}
+              >
+                {rescueActivating
+                  ? t("doctor.activatingRescueBot")
+                  : t("doctor.activateRescueBot")}
+              </Button>
               <Button variant="ghost" size="sm" onClick={() => openLogs("clawpal")}>
                 {t("doctor.clawpalLogs")}
               </Button>
@@ -189,6 +230,9 @@ export function Doctor({ sshHosts }: DoctorProps) {
           </div>
         </CardHeader>
         <CardContent>
+          {rescueMessage && (
+            <div className="mb-3 text-sm text-muted-foreground">{rescueMessage}</div>
+          )}
           {!doctor.connected && doctor.messages.length === 0 ? (
             <>
               {/* Source radio — instance gateways (excluding current target) + remote doctor */}
