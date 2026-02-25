@@ -3451,8 +3451,30 @@ fn run_openclaw_raw_timeout(args: &[&str], timeout_secs: Option<u64>) -> Result<
 
 /// Strip leading non-JSON lines from CLI output (plugin logs, ANSI codes, etc.)
 fn extract_json_from_output(raw: &str) -> Option<&str> {
-    let start = raw.find('{').or_else(|| raw.find('['))?;
-    Some(&raw[start..])
+    let end_object = raw.rfind('}');
+    let end_array = raw.rfind(']');
+    let (end, opener, closer) = match (end_object, end_array) {
+        (Some(object_end), Some(array_end)) if object_end > array_end => (object_end, b'{', b'}'),
+        (Some(_), Some(array_end)) => (array_end, b'[', b']'),
+        (Some(object_end), None) => (object_end, b'{', b'}'),
+        (None, Some(array_end)) => (array_end, b'[', b']'),
+        (None, None) => return None,
+    };
+
+    let bytes = raw.as_bytes();
+    let mut depth: i32 = 0;
+    for i in (0..=end).rev() {
+        let ch = bytes[i];
+        if ch == closer {
+            depth += 1;
+        } else if ch == opener {
+            depth -= 1;
+            if depth == 0 {
+                return Some(&raw[i..=end]);
+            }
+        }
+    }
+    None
 }
 
 /// Extract the last JSON array from CLI output that may contain ANSI codes and plugin logs.
@@ -5146,6 +5168,21 @@ mod rescue_bot_tests {
         assert_eq!(issues[0].severity, "warn");
         assert!(issues[0].auto_fixable);
         assert_eq!(issues[0].fix_hint.as_deref(), Some("do thing"));
+    }
+
+    #[test]
+    fn test_extract_json_from_output_uses_trailing_balanced_payload() {
+        let raw = "[plugins] warmup cache\n[warn] using fallback transport\n{\"ok\":false,\"issues\":[{\"id\":\"x\"}]}";
+        let json = extract_json_from_output(raw).unwrap();
+        assert_eq!(json, "{\"ok\":false,\"issues\":[{\"id\":\"x\"}]}");
+    }
+
+    #[test]
+    fn test_parse_json_loose_handles_leading_bracketed_logs() {
+        let raw = "[plugins] warmup cache\n[warn] using fallback transport\n{\"running\":false,\"healthy\":false}";
+        let parsed = parse_json_loose(raw).expect("expected trailing JSON payload");
+        assert_eq!(parsed.get("running").and_then(Value::as_bool), Some(false));
+        assert_eq!(parsed.get("healthy").and_then(Value::as_bool), Some(false));
     }
 
     #[test]
