@@ -136,6 +136,16 @@ pub struct OpenclawCommandOutput {
     pub exit_code: i32,
 }
 
+impl From<crate::cli_runner::CliOutput> for OpenclawCommandOutput {
+    fn from(value: crate::cli_runner::CliOutput) -> Self {
+        Self {
+            stdout: value.stdout,
+            stderr: value.stderr,
+            exit_code: value.exit_code,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RescueBotCommandResult {
@@ -2196,9 +2206,7 @@ pub async fn remote_fix_issues(pool: State<'_, SshConnectionPool>, host_id: Stri
     }
 
     if !applied.is_empty() {
-        let new_text = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
         remote_write_config_with_snapshot(&pool, &host_id, &raw, &cfg, "doctor-fix").await?;
-        let _ = new_text; // written by remote_write_config_with_snapshot
     }
 
     let remaining: Vec<String> = ids.into_iter().filter(|id| !applied.contains(id)).collect();
@@ -2691,32 +2699,29 @@ fn build_primary_issue_fix_command(
     target_profile: &str,
     issue_id: &str,
 ) -> Option<(String, Vec<String>)> {
+    let normalize_primary_model_command = || {
+        build_profile_command(
+            target_profile,
+            &[
+                "config",
+                "set",
+                "agents.defaults.model",
+                "anthropic/claude-sonnet-4-5",
+                "--json",
+            ],
+        )
+    };
+
     match issue_id {
         "field.agents" => Some((
             "Initialize agents.defaults.model".into(),
-            build_profile_command(
-                target_profile,
-                &[
-                    "config",
-                    "set",
-                    "agents.defaults.model",
-                    "anthropic/claude-sonnet-4-5",
-                    "--json",
-                ],
-            ),
+            normalize_primary_model_command(),
         )),
         "json.syntax" => Some((
             "Normalize primary profile config".into(),
-            build_profile_command(
-                target_profile,
-                &[
-                    "config",
-                    "set",
-                    "agents.defaults.model",
-                    "anthropic/claude-sonnet-4-5",
-                    "--json",
-                ],
-            ),
+            // For malformed JSON/JSON5 configs, writing a known-safe key through
+            // `openclaw config set` forces CLI parsing + canonical rewrite.
+            normalize_primary_model_command(),
         )),
         "field.port" => Some((
             "Normalize gateway port".into(),
@@ -3339,12 +3344,7 @@ fn run_local_gateway_restart_fallback(
 
 fn run_openclaw_dynamic(args: &[String]) -> Result<OpenclawCommandOutput, String> {
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let output = crate::cli_runner::run_openclaw(&refs)?;
-    Ok(OpenclawCommandOutput {
-        stdout: output.stdout,
-        stderr: output.stderr,
-        exit_code: output.exit_code,
-    })
+    crate::cli_runner::run_openclaw(&refs).map(Into::into)
 }
 
 async fn resolve_remote_rescue_profile_state(

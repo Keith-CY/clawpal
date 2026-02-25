@@ -30,6 +30,52 @@ interface DoctorProps {
   sshHosts: SshHost[];
 }
 
+type RescueMessageTone = "info" | "success" | "error";
+
+interface RescueUiState {
+  activating: boolean;
+  deactivating: boolean;
+  unsetting: boolean;
+  statusChecking: boolean;
+  configured: boolean | null;
+  profile: string;
+  port: number | null;
+  message: string | null;
+  messageTone: RescueMessageTone;
+}
+
+interface PrimaryRecoveryState {
+  checkLoading: boolean;
+  checkResult: RescuePrimaryDiagnosisResult | null;
+  checkError: string | null;
+  repairing: boolean;
+  repairingIssueId: string | null;
+  repairResult: RescuePrimaryRepairResult | null;
+  repairError: string | null;
+}
+
+const createInitialRescueUiState = (): RescueUiState => ({
+  activating: false,
+  deactivating: false,
+  unsetting: false,
+  statusChecking: false,
+  configured: null,
+  profile: "rescue",
+  port: null,
+  message: null,
+  messageTone: "info",
+});
+
+const createInitialPrimaryRecoveryState = (): PrimaryRecoveryState => ({
+  checkLoading: false,
+  checkResult: null,
+  checkError: null,
+  repairing: false,
+  repairingIssueId: null,
+  repairResult: null,
+  repairError: null,
+});
+
 export function Doctor({ sshHosts }: DoctorProps) {
   const { t } = useTranslation();
   const ua = useApi();
@@ -55,41 +101,44 @@ export function Doctor({ sshHosts }: DoctorProps) {
   const [logsContent, setLogsContent] = useState("");
   const [logsLoading, setLogsLoading] = useState(false);
   const logsContentRef = useRef<HTMLPreElement>(null);
-  const [rescueActivating, setRescueActivating] = useState(false);
-  const [rescueDeactivating, setRescueDeactivating] = useState(false);
-  const [rescueUnsetting, setRescueUnsetting] = useState(false);
-  const [rescueStatusChecking, setRescueStatusChecking] = useState(false);
-  const [rescueConfigured, setRescueConfigured] = useState<boolean | null>(null);
-  const [rescueProfile, setRescueProfile] = useState("rescue");
-  const [rescuePort, setRescuePort] = useState<number | null>(null);
-  const [rescueMessage, setRescueMessage] = useState<string | null>(null);
-  const [rescueMessageTone, setRescueMessageTone] = useState<"info" | "success" | "error">("info");
-  const [primaryCheckLoading, setPrimaryCheckLoading] = useState(false);
-  const [primaryCheckResult, setPrimaryCheckResult] = useState<RescuePrimaryDiagnosisResult | null>(null);
-  const [primaryCheckError, setPrimaryCheckError] = useState<string | null>(null);
-  const [primaryRepairing, setPrimaryRepairing] = useState(false);
-  const [primaryRepairingIssueId, setPrimaryRepairingIssueId] = useState<string | null>(null);
-  const [primaryRepairResult, setPrimaryRepairResult] = useState<RescuePrimaryRepairResult | null>(null);
-  const [primaryRepairError, setPrimaryRepairError] = useState<string | null>(null);
+  const [rescueState, setRescueState] = useState<RescueUiState>(createInitialRescueUiState);
+  const [primaryState, setPrimaryState] = useState<PrimaryRecoveryState>(createInitialPrimaryRecoveryState);
+
+  const {
+    activating: rescueActivating,
+    deactivating: rescueDeactivating,
+    unsetting: rescueUnsetting,
+    statusChecking: rescueStatusChecking,
+    configured: rescueConfigured,
+    profile: rescueProfile,
+    port: rescuePort,
+    message: rescueMessage,
+    messageTone: rescueMessageTone,
+  } = rescueState;
+  const {
+    checkLoading: primaryCheckLoading,
+    checkResult: primaryCheckResult,
+    checkError: primaryCheckError,
+    repairing: primaryRepairing,
+    repairingIssueId: primaryRepairingIssueId,
+    repairResult: primaryRepairResult,
+    repairError: primaryRepairError,
+  } = primaryState;
+
+  const updateRescueState = (patch: Partial<RescueUiState>) => {
+    setRescueState((prev) => ({ ...prev, ...patch }));
+  };
+
+  const updatePrimaryState = (patch: Partial<PrimaryRecoveryState>) => {
+    setPrimaryState((prev) => ({ ...prev, ...patch }));
+  };
 
   // Reset doctor agent when switching instances
   useEffect(() => {
     doctor.reset();
     doctor.disconnect();
-    setRescueMessage(null);
-    setRescueMessageTone("info");
-    setRescueActivating(false);
-    setRescueDeactivating(false);
-    setRescueUnsetting(false);
-    setRescueStatusChecking(false);
-    setRescueConfigured(null);
-    setRescueProfile("rescue");
-    setRescuePort(null);
-    setPrimaryCheckResult(null);
-    setPrimaryCheckError(null);
-    setPrimaryRepairingIssueId(null);
-    setPrimaryRepairResult(null);
-    setPrimaryRepairError(null);
+    setRescueState(createInitialRescueUiState());
+    setPrimaryState(createInitialPrimaryRecoveryState());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instanceId]);
 
@@ -200,167 +249,211 @@ export function Doctor({ sshHosts }: DoctorProps) {
     setLogsOpen(true);
   };
 
-  const refreshRescueStatus = async () => {
+  const refreshRescueStatus = async (isCancelled?: () => boolean) => {
+    const cancelled = () => isCancelled?.() ?? false;
     if (isRemote && !isConnected) {
-      setRescueConfigured(null);
-      setRescuePort(null);
-      setRescueMessage(t("doctor.rescueBotConnectRequired"));
-      setRescueMessageTone("info");
+      if (cancelled()) return;
+      updateRescueState({
+        configured: null,
+        port: null,
+        message: t("doctor.rescueBotConnectRequired"),
+        messageTone: "info",
+      });
       return;
     }
 
-    setRescueStatusChecking(true);
+    updateRescueState({ statusChecking: true });
     try {
       const result = await ua.manageRescueBot("status");
-      setRescueConfigured(result.wasAlreadyConfigured);
-      setRescueProfile(result.profile);
-      setRescuePort(result.wasAlreadyConfigured ? result.rescuePort : null);
-      if (result.wasAlreadyConfigured) {
-        setRescueMessage(
-          t("doctor.rescueBotAlreadyConfiguredState", {
+      if (cancelled()) return;
+      updateRescueState({
+        configured: result.wasAlreadyConfigured,
+        profile: result.profile,
+        port: result.wasAlreadyConfigured ? result.rescuePort : null,
+        message: result.wasAlreadyConfigured
+          ? t("doctor.rescueBotAlreadyConfiguredState", {
             profile: result.profile,
             port: result.rescuePort,
-          }),
-        );
-      } else {
-        setRescueMessage(t("doctor.rescueBotNotConfigured"));
-      }
-      setRescueMessageTone("info");
+          })
+          : t("doctor.rescueBotNotConfigured"),
+        messageTone: "info",
+      });
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      setRescueConfigured(null);
-      setRescuePort(null);
-      setRescueMessage(t("doctor.rescueBotStatusCheckFailed", { error: text }));
-      setRescueMessageTone("error");
+      if (cancelled()) return;
+      updateRescueState({
+        configured: null,
+        port: null,
+        message: t("doctor.rescueBotStatusCheckFailed", { error: text }),
+        messageTone: "error",
+      });
     } finally {
-      setRescueStatusChecking(false);
+      if (cancelled()) return;
+      updateRescueState({ statusChecking: false });
     }
   };
 
   const handleActivateRescueBot = async () => {
     if (isRemote && !isConnected) {
-      setRescueMessage(t("doctor.rescueBotConnectRequired"));
-      setRescueMessageTone("error");
+      updateRescueState({
+        message: t("doctor.rescueBotConnectRequired"),
+        messageTone: "error",
+      });
       return;
     }
     if (rescueConfigured && rescuePort !== null) {
-      setRescueMessage(
-        t("doctor.rescueBotAlreadyConfiguredState", {
+      updateRescueState({
+        message: t("doctor.rescueBotAlreadyConfiguredState", {
           profile: rescueProfile,
           port: rescuePort,
         }),
-      );
-      setRescueMessageTone("info");
+        messageTone: "info",
+      });
       return;
     }
-    setRescueActivating(true);
-    setRescueMessage(null);
-    setRescueMessageTone("info");
+    updateRescueState({
+      activating: true,
+      message: null,
+      messageTone: "info",
+    });
     try {
       const result = await ua.manageRescueBot("activate");
-      setRescueConfigured(true);
-      setRescueProfile(result.profile);
-      setRescuePort(result.rescuePort);
-      setRescueMessage(
-        t("doctor.rescueBotActivated", {
+      updateRescueState({
+        configured: true,
+        profile: result.profile,
+        port: result.rescuePort,
+        message: t("doctor.rescueBotActivated", {
           profile: result.profile,
           port: result.rescuePort,
         }),
-      );
-      setRescueMessageTone("success");
+        messageTone: "success",
+      });
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       if (text.includes("Gateway restart timed out")) {
-        setRescueMessage(t("doctor.rescueBotFailedTimeout", { error: text }));
+        updateRescueState({
+          message: t("doctor.rescueBotFailedTimeout", { error: text }),
+          messageTone: "error",
+        });
       } else {
-        setRescueMessage(t("doctor.rescueBotFailed", { error: text }));
+        updateRescueState({
+          message: t("doctor.rescueBotFailed", { error: text }),
+          messageTone: "error",
+        });
       }
-      setRescueMessageTone("error");
     } finally {
-      setRescueActivating(false);
+      updateRescueState({ activating: false });
     }
   };
 
   const handleDeactivateRescueBot = async () => {
     if (isRemote && !isConnected) {
-      setRescueMessage(t("doctor.rescueBotConnectRequired"));
-      setRescueMessageTone("error");
+      updateRescueState({
+        message: t("doctor.rescueBotConnectRequired"),
+        messageTone: "error",
+      });
       return;
     }
-    setRescueDeactivating(true);
-    setRescueMessage(null);
-    setRescueMessageTone("info");
+    updateRescueState({
+      deactivating: true,
+      message: null,
+      messageTone: "info",
+    });
     try {
       const result = await ua.manageRescueBot("deactivate");
-      setRescueProfile(result.profile);
       if (result.wasAlreadyConfigured) {
-        setRescueConfigured(true);
-        setRescuePort(result.rescuePort);
-        setRescueMessage(t("doctor.rescueBotDeactivated", { profile: result.profile }));
-        setRescueMessageTone("success");
+        updateRescueState({
+          profile: result.profile,
+          configured: true,
+          port: result.rescuePort,
+          message: t("doctor.rescueBotDeactivated", { profile: result.profile }),
+          messageTone: "success",
+        });
       } else {
-        setRescueConfigured(false);
-        setRescuePort(null);
-        setRescueMessage(t("doctor.rescueBotAlreadyNotConfigured"));
-        setRescueMessageTone("info");
+        updateRescueState({
+          profile: result.profile,
+          configured: false,
+          port: null,
+          message: t("doctor.rescueBotAlreadyNotConfigured"),
+          messageTone: "info",
+        });
       }
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      setRescueMessage(t("doctor.rescueBotDeactivateFailed", { error: text }));
-      setRescueMessageTone("error");
+      updateRescueState({
+        message: t("doctor.rescueBotDeactivateFailed", { error: text }),
+        messageTone: "error",
+      });
     } finally {
-      setRescueDeactivating(false);
+      updateRescueState({ deactivating: false });
     }
   };
 
   const handleUnsetRescueBot = async () => {
     if (isRemote && !isConnected) {
-      setRescueMessage(t("doctor.rescueBotConnectRequired"));
-      setRescueMessageTone("error");
+      updateRescueState({
+        message: t("doctor.rescueBotConnectRequired"),
+        messageTone: "error",
+      });
       return;
     }
-    setRescueUnsetting(true);
-    setRescueMessage(null);
-    setRescueMessageTone("info");
+    updateRescueState({
+      unsetting: true,
+      message: null,
+      messageTone: "info",
+    });
     try {
       const result = await ua.manageRescueBot("unset");
-      setRescueProfile(result.profile);
-      setRescueConfigured(false);
-      setRescuePort(null);
       if (result.wasAlreadyConfigured) {
-        setRescueMessage(t("doctor.rescueBotUnset", { profile: result.profile }));
-        setRescueMessageTone("success");
+        updateRescueState({
+          profile: result.profile,
+          configured: false,
+          port: null,
+          message: t("doctor.rescueBotUnset", { profile: result.profile }),
+          messageTone: "success",
+        });
       } else {
-        setRescueMessage(t("doctor.rescueBotAlreadyNotConfigured"));
-        setRescueMessageTone("info");
+        updateRescueState({
+          profile: result.profile,
+          configured: false,
+          port: null,
+          message: t("doctor.rescueBotAlreadyNotConfigured"),
+          messageTone: "info",
+        });
       }
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      setRescueMessage(t("doctor.rescueBotUnsetFailed", { error: text }));
-      setRescueMessageTone("error");
+      updateRescueState({
+        message: t("doctor.rescueBotUnsetFailed", { error: text }),
+        messageTone: "error",
+      });
     } finally {
-      setRescueUnsetting(false);
+      updateRescueState({ unsetting: false });
     }
   };
 
   const handleCheckPrimaryViaRescue = async () => {
     if (isRemote && !isConnected) {
-      setPrimaryCheckError(t("doctor.rescueBotConnectRequired"));
+      updatePrimaryState({ checkError: t("doctor.rescueBotConnectRequired") });
       return;
     }
-    setPrimaryCheckLoading(true);
-    setPrimaryCheckError(null);
-    setPrimaryRepairError(null);
-    setPrimaryRepairResult(null);
+    updatePrimaryState({
+      checkLoading: true,
+      checkError: null,
+      repairError: null,
+      repairResult: null,
+    });
     try {
       const result = await ua.diagnosePrimaryViaRescue("primary", rescueProfile);
-      setPrimaryCheckResult(result);
+      updatePrimaryState({ checkResult: result });
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      setPrimaryCheckResult(null);
-      setPrimaryCheckError(t("doctor.primaryCheckFailed", { error: text }));
+      updatePrimaryState({
+        checkResult: null,
+        checkError: t("doctor.primaryCheckFailed", { error: text }),
+      });
     } finally {
-      setPrimaryCheckLoading(false);
+      updatePrimaryState({ checkLoading: false });
     }
   };
 
@@ -381,13 +474,15 @@ export function Doctor({ sshHosts }: DoctorProps) {
 
   const handleRepairPrimaryViaRescue = async () => {
     if (isRemote && !isConnected) {
-      setPrimaryRepairError(t("doctor.rescueBotConnectRequired"));
+      updatePrimaryState({ repairError: t("doctor.rescueBotConnectRequired") });
       return;
     }
-    setPrimaryRepairing(true);
-    setPrimaryRepairingIssueId(null);
-    setPrimaryRepairError(null);
-    setPrimaryRepairResult(null);
+    updatePrimaryState({
+      repairing: true,
+      repairingIssueId: null,
+      repairError: null,
+      repairResult: null,
+    });
     try {
       const selectedIssueIds =
         primaryCheckResult?.issues
@@ -398,16 +493,22 @@ export function Doctor({ sshHosts }: DoctorProps) {
         rescueProfile,
         selectedIssueIds.length > 0 ? selectedIssueIds : undefined,
       );
-      setPrimaryRepairResult(result);
-      setPrimaryCheckResult(result.after);
-      setPrimaryCheckError(null);
+      updatePrimaryState({
+        repairResult: result,
+        checkResult: result.after,
+        checkError: null,
+      });
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      setPrimaryRepairResult(null);
-      setPrimaryRepairError(t("doctor.primaryRepairFailed", { error: text }));
+      updatePrimaryState({
+        repairResult: null,
+        repairError: t("doctor.primaryRepairFailed", { error: text }),
+      });
     } finally {
-      setPrimaryRepairing(false);
-      setPrimaryRepairingIssueId(null);
+      updatePrimaryState({
+        repairing: false,
+        repairingIssueId: null,
+      });
     }
   };
 
@@ -416,30 +517,42 @@ export function Doctor({ sshHosts }: DoctorProps) {
       return;
     }
     if (isRemote && !isConnected) {
-      setPrimaryRepairError(t("doctor.rescueBotConnectRequired"));
+      updatePrimaryState({ repairError: t("doctor.rescueBotConnectRequired") });
       return;
     }
-    setPrimaryRepairing(true);
-    setPrimaryRepairingIssueId(issue.id);
-    setPrimaryRepairError(null);
-    setPrimaryRepairResult(null);
+    updatePrimaryState({
+      repairing: true,
+      repairingIssueId: issue.id,
+      repairError: null,
+      repairResult: null,
+    });
     try {
       const result = await ua.repairPrimaryViaRescue("primary", rescueProfile, [issue.id]);
-      setPrimaryRepairResult(result);
-      setPrimaryCheckResult(result.after);
-      setPrimaryCheckError(null);
+      updatePrimaryState({
+        repairResult: result,
+        checkResult: result.after,
+        checkError: null,
+      });
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      setPrimaryRepairResult(null);
-      setPrimaryRepairError(t("doctor.primaryRepairFailed", { error: text }));
+      updatePrimaryState({
+        repairResult: null,
+        repairError: t("doctor.primaryRepairFailed", { error: text }),
+      });
     } finally {
-      setPrimaryRepairing(false);
-      setPrimaryRepairingIssueId(null);
+      updatePrimaryState({
+        repairing: false,
+        repairingIssueId: null,
+      });
     }
   };
 
   useEffect(() => {
-    void refreshRescueStatus();
+    let cancelled = false;
+    void refreshRescueStatus(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instanceId, isRemote, isConnected]);
 
@@ -508,7 +621,9 @@ export function Doctor({ sshHosts }: DoctorProps) {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={refreshRescueStatus}
+                onClick={() => {
+                  void refreshRescueStatus();
+                }}
                 disabled={
                   rescueActivating
                   || rescueDeactivating
